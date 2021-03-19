@@ -1,0 +1,215 @@
+-- docker
+
+-- развернем ВМ postgres в GCE
+gcloud beta compute --project=celtic-house-266612 instances CREATE mysqldocker --zone=us-central1-a --machine-type=e2-medium --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/servicecontrol,https://www.googleapis.com/auth/service.management.readonly,https://www.googleapis.com/auth/trace.append --image=ubuntu-2004-focal-v20210129 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=mysqldocker --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+ 
+gcloud compute ssh mysqldocker
+
+-- поставим докер
+sudo apt-get UPDATE && sudo apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common && curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add - && sudo apt-key fingerprint 0EBFCD88 && sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) sTABLE" && sudo apt-get UPDATE && sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+
+-- https://medium.com/@ahmedamedy/mysql-clustering-with-docker-611dc28b8db7
+-- до недавнего времени latest: 7.6.15-1.1.17-cluster
+-- теперь новый latest 8.0.23
+-- https://hub.docker.com/r/mysql/mysql-cluster/
+sudo docker pull mysql/mysql-cluster
+-- создадим сеть
+sudo docker network CREATE cluster --subnet=192.168.0.0/16
+-- создадим управляющую ноду
+sudo docker run -d --net=cluster --name=management1 --ip=192.168.0.2 mysql/mysql-cluster ndb_mgmd
+-- создадим две дата ноды
+sudo docker run -d --net=cluster --name=ndb1 --ip=192.168.0.3 mysql/mysql-cluster ndbd
+sudo docker run -d --net=cluster --name=ndb2 --ip=192.168.0.4 mysql/mysql-cluster ndbd
+-- создадим серверную SQL ноду
+sudo docker run -d --net=cluster --name=mysql1 --ip=192.168.0.10 -e MYSQL_RANDOM_ROOT_PASSWORD=true mysql/mysql-cluster mysqld
+
+-- подключение к кластеру
+-- найдем временный пароль - не сразу нода создается, чть подождать
+sudo docker logs mysql1 2>&1 | grep PASSWORD
+
+-- если вдруг в пароле )($ используем \
+XuGhAh0fUvEGIkdUbk4vyn@dG0r
+sudo docker exec -it mysql1 mysql -uroot -pXuGhAh0fUvEGIkdUbk4vyn@dG0r
+-- подключимся клиентом
+sudo docker exec -it mysql1 mysql -uroot -p<found_pass>
+-- заменим пароль
+mysql> ALTER USER 'root'@'localhost' IDENTIFIED BY 'otus321$';
+
+> show databases;
+> use ndbinfo;
+> show TABLEs;
+> SELECT * FROM nodes;
+
+-- запустим управляющий шелл
+gcloud compute ssh mysqldocker
+sudo docker run -it --net=cluster mysql/mysql-cluster ndb_mgm
+> show
+> help
+<id> REPORT <report-type>
+> CLUSTERLOG INFO
+> 2 report MEMORYUSAGE
+> 2 report EVENTLOG
+> all report MEMORYUSAGE
+
+-- подключимся к SQL ноде с новым паролем
+sudo docker exec -it mysql1 mysql -uroot -potus321$
+
+> show databases;
+-- создадим бд и таблицу без ключа
+> CREATE SCHEMA test;
+-- вспомним, что под капотом CREATE database
+> show CREATE SCHEMA test;
+> use test;
+> CREATE TABLE otus(i int);
+> INSERT INTO otus VALUES (1);
+> SELECT * FROM information_schema.partitions WHERE TABLE_schema='test';
+-- не видим партиции?
+
+-- посмотрим на табличку - нет primary key
+> show CREATE TABLE otus;
+
+-- создадим с ключом
+
+> CREATE TABLE otus2(i SERIAL, t text);
+> INSERT INTO otus2(t) values('test');
+> SELECT * FROM otus2;
+> SELECT * FROM information_schema.partitions WHERE TABLE_schema='test';
+-- данные опять не разьехались по партициям. Почему?
+
+
+-- обратим внимание на движок
+> show CREATE TABLE otus2;
+
+> ALTER TABLE otus2 engine = ndbcluster;
+> SELECT * FROM information_schema.partitions WHERE TABLE_schema='test'\G
+
+-- посмотрим, что с нодой
+use ndbinfo;
+show TABLEs;
+SELECT * FROM nodes;
+SELECT * FROM membership;
+SELECT * FROM TABLE_fragments;
+
+-- объединим таблички innodb и ndbcluster
+use test;
+SELECT * FROM otus, otus2 WHERE otus.i = otus2.i;
+
+
+-- почему за 3 команды мы запустили кластер и ноды нашли друг друга?
+
+-- посмотрим конфиги
+sudo docker exec -it mysql1 bash
+cat /etc/mysql-cluster.cnf
+
+-- почему при одинаковых конфигам контейнера, ноды запустились в разном режиме?
+cat entrypoint.sh
+
+-- добавим ноду
+-- https://dev.mysql.com/doc/mysql-cluster-excerpt/8.0/en/mysql-cluster-online-add-node-basics.html
+-- https://dev.mysql.com/doc/mysql-cluster-excerpt/5.7/en/mysql-cluster-online-add-node-example.html
+
+-- при попытке добавить ноду: 
+sudo docker run -d --net=cluster --name=ndb5 --ip=192.168.0.15 mysql/mysql-cluster ndbd
+sudo docker ps 
+sudo docker ps -a
+-- посмотрим логи, че пошло не так
+sudo docker logs ndb5
+sudo docker rm ndb5
+2020-09-01 12:21:53 [ndbd] INFO     -- Angel connected to '192.168.0.2:1186'
+2020-09-01 12:21:53 [ndbd] ERROR    -- Failed to allocate nodeid, error: 'Error: Could not alloc node id at 192.168.0.2
+ port 1186: Connection done FROM wrong host ip 192.168.0.40.'
+
+
+-- ремомендация MySQL - отредактируйте конфиг и рестартаните конфиг. А внутри ни vi, ничего
+-- можно echo >>
+sudo docker exec -it management1 bash
+-- вытащим конфиг и отредактируем
+sudo docker cp management1:/etc/mysql-cluster.cnf ./
+ -- добавим 2 ноды
+sudo nano mysql-cluster.cnf
+
+-- запихаем файл конфигурации обратно 
+sudo docker cp mysql-cluster.cnf management1:/etc/mysql-cluster.cnf
+
+sudo docker stop management1
+-- или можем рестартнуть ноду через команду
+
+sudo docker exec -it mysql1 mysql -uroot -potus321$
+ -- все работает и без менеджера
+
+sudo docker start management1
+sudo docker run -d --net=cluster --name=ndb5 --ip=192.168.0.15 mysql/mysql-cluster ndbd
+sudo docker run -d --net=cluster --name=ndb6 --ip=192.168.0.16 mysql/mysql-cluster ndbd
+
+sudo docker ps 
+-- посмотрим логи, че пошло не так
+sudo docker logs ndb5   
+
+
+sudo docker run -it --net=cluster mysql/mysql-cluster ndb_mgm
+
+
+-- получили отлуп
+2020-09-01 12:44:04 [ndbd] INFO     -- Angel connected to '192.168.0.2:1186'
+2020-09-01 12:44:04 [ndbd] ERROR    -- Failed to allocate nodeid, error: 'Error: Could not alloc node id at 192.168.0.2
+port 1186: Connection done FROM wrong host ip 192.168.0.15.'
+
+sudo docker rm ndb5
+sudo docker rm ndb6
+
+--что делать дальше?
+
+sudo docker exec -it management1 ndb_mgm
+> show
+
+sudo docker stop management1
+sudo docker rm management1
+
+-- рабочий вариант
+sudo docker run -d --net=cluster --name=management1 --ip=192.168.0.2 -v /home/aeugene/mysql-cluster.cnf:/etc/mysql-cluster.cnf mysql/mysql-cluster ndb_mgmd
+sudo docker exec -it management1 ndb_mgm
+show
+
+-- опять %(
+[Entrypoint] MySQL Docker Image 7.6.15-1.1.17-cluster
+[Entrypoint] Starting ndbd
+2020-10-11 09:44:39 [ndbd] INFO     -- Angel connected to '192.168.0.2:1186'
+2020-10-11 09:45:10 [ndbd] ERROR    -- Failed to allocate nodeid, error: 'Error: Could not alloc 
+node id at 192.168.0.2 port 1186: No free node id found for ndbd(NDB).'
+
+-- необходимо сделать роллинг апдейт живых нод
+> 2 restart
+-- попробуем в этот момент сделать запрос. Будет ли он работать?
+sudo docker exec -it mysql1 mysql -uroot -potus321$
+use test;
+SELECT * FROM otus2;
+
+> 3 restart
+sudo docker run -d --net=cluster --name=ndb5 --ip=192.168.0.15 mysql/mysql-cluster ndbd
+sudo docker rm ndb5
+
+-- опять фейл %(
+Node 5: Forced node shutdown completed. Occurred during startphase 5. Caused by error 2341: 
+'Internal program error (failed ndbrequire)(Internal error, programming error or missing error message, 
+please report a bug). Temporary error, restart node'.
+
+-- конфиг то новый мы не прокинули
+sudo docker rm ndb5
+sudo docker run -d --net=cluster --name=ndb5 --ip=192.168.0.15 -v /home/aeugene/mysql-cluster.cnf:/etc/mysql-cluster.cnf mysql/mysql-cluster ndbd
+sudo docker run -d --net=cluster --name=ndb6 --ip=192.168.0.16 -v /home/aeugene/mysql-cluster.cnf:/etc/mysql-cluster.cnf mysql/mysql-cluster ndbd
+
+
+
+-- добавить nodegroup
+https://dev.mysql.com/doc/mysql-cluster-excerpt/8.0/en/mysql-cluster-mgm-client-commands.html
+
+
+
+-- убрать за собой
+docker stop $(docker ps)
+docker rm $(docker ps -a)
+docker rmi -f $(docker images -a -q)
+docker network prune
+
+-- удалим ВМ
+gcloud compute instances delete mysqldocker

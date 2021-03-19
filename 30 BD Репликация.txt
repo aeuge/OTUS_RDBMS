@@ -1,0 +1,167 @@
+-- развернем 2 ВМ mysql1, mysql2 с 8 версией и паролем Otus321$
+gcloud beta compute --project=celtic-house-266612 instances CREATE mysql1 --zone=us-central1-a --machine-type=e2-medium --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/servicecontrol,https://www.googleapis.com/auth/service.management.readonly,https://www.googleapis.com/auth/trace.append --image=ubuntu-2010-groovy-v20210211a --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=mysql1 --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+
+gcloud beta compute --project=celtic-house-266612 instances CREATE mysql2 --zone=us-central1-a --machine-type=e2-medium --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/servicecontrol,https://www.googleapis.com/auth/service.management.readonly,https://www.googleapis.com/auth/trace.append --image=ubuntu-2010-groovy-v20210211a --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=mysql2 --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+
+gcloud compute ssh mysql1
+-- Поставим 8 мускуль
+-- https://www.mysql.com/downloads/
+-- пакет 8.16 для ubuntu 2020-10 groovy
+sudo wget -c https://dev.mysql.com/get/mysql-apt-config_0.8.16-1_all.deb && sudo dpkg -i mysql-apt-config_0.8.16-1_all.deb && sudo apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5 && sudo apt UPDATE && sudo apt-get install mysql-server -y
+
+mysql_secure_installation
+
+sudo mysql -u root -p
+SELECT * FROM mysql.USER WHERE User="root";
+-- mysql_native_password - для совместимости с версией 5.7
+ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY 'OtusOtus1#';
+
+sudo su
+cd $HOME
+nano .my.cnf
+[client]
+password="OtusOtus1#"
+
+mysql
+-- посмотрим id сервера
+> SELECT @@server_id;
+-- ну и события бинлога
+> show binlog events;
+> show variables like '%binlog%';
+
+-- бэкап & ресторе
+-- https://phoenixnap.com/kb/how-to-backup-restore-a-mysql-database
+
+-- в 8.0.28 произошли изменения
+# Instead of skip-networking the default is now to listen only on
+# localhost which is more compatible and is not less secure.
+bind-address            = 127.0.0.1
+
+sudo nano /etc/mysql/mysql.conf.d/mysqld.cnf
+bind-address            = 10.128.15.222
+sudo service mysql restart
+
+
+-- настройка репликации
+-- ON MASTER
+-- CREATE USER repl@10.128.15.209 IDENTIFIED BY 'oTUSlave#2020'; 
+-- в версии 8.0.23 уже не работает из коробки, только caching_sha2_password
+-- !!! работайте через внутреннюю сеть !!!!
+CREATE USER repl@10.128.15.226 IDENTIFIED WITH caching_sha2_password BY 'oTUSlave#2020';
+-- https://dev.mysql.com/doc/refman/8.0/en/caching-sha2-pluggable-authentication.html
+GRANT REPLICATION SLAVE ON *.* TO repl@10.128.15.226;
+SELECT User, Host FROM mysql.user;
+SHOW MASTER STATUS;
+
+-- ON SLAVE
+-- меняем server_id на слейве
+nano /etc/mysql/mysql.conf.d/mysqld.cnf
+server_id = 2
+
+service mysql restart
+SELECT @@server_id;
+-- !!! здесь ip мастера
+-- указываем файл и позицию бинлога
+-- !!! без публичного ключа - не отработает
+-- простое копирование не поможет
+SHOW GLOBAL VARIABLES LIKE 'caching_sha2_password_public_key_path';
+SHOW STATUS LIKE 'Caching_sha2_password_rsa_public_key'\G
+
+> CHANGE MASTER TO MASTER_HOST='10.128.15.225', MASTER_USER='repl', MASTER_PASSWORD='oTUSlave#2020', MASTER_LOG_FILE='binlog.000004', MASTER_LOG_POS=156;
+> START SLAVE;
+> show slave status\G
+
+> STOP SLAVE;
+> CHANGE MASTER TO MASTER_HOST='10.128.15.225', MASTER_USER='repl', MASTER_PASSWORD='oTUSlave#2020', MASTER_LOG_FILE='binlog.000004', MASTER_LOG_POS=156, GET_MASTER_PUBLIC_KEY = 1;
+> START SLAVE;
+> show slave status\G
+
+
+
+-- https://dev.mysql.com/doc/refman/8.0/en/replica-logs-relaylog.html
+-- можем настроить наш relay.log
+show variables like '%relay%';
+
+-- посмотрим статусы репликации
+use performance_schema;
+show TABLEs like '%replic%';
+
+show variables like '%binlog%';
+
+-- кстати на слейве можем также менять состояние БД по умолчанию %)
+-- отключить возможность редактирования данных на слейве
+show variables like '%read%';
+-- на текущий запуск инстанса
+set global innodb_read_only = ON
+-- на постоянку в конфигурационном файле
+
+
+-- КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ СОСТОЯНИЕМ
+STOP SLAVE;
+START SLAVE;
+
+-- варианты разрешения конфликтов
+1. удалить на слейве блокирующую запись
+2. STOP SLAVE;
+RESET SLAVE;
+SHOW SLAVE STATUS; -- на мастере
+-- новый номер позиции в бинлоге
+
+START SLAVE;
+
+3. скипаем 1 ошибку
+stop slave; 
+set global sql_slave_skip_counter=1; 
+start slave;
+
+-- скрипт избавления от дубликатов при репликации
+while [ 1 ]; do      
+if [ `mysql -uroot -ptest -e"show slave status \G;" | grep "Duplicate entry" | wc -l` -eq 2 ] ; then          
+mysql -uroot -ptest -e"stop slave; set global sql_slave_skip_counter=1; start slave;";      
+fi;      
+mysql -uroot -ptest -e"show slave status\G";  
+done
+
+4. -- можно добавить в конфиг игнор ошибки при репликации
+ну для duplicate entry например ошибка номер 1062
+в конфиг добавляется
+slave-skip-errors = 1062
+
+
+-- GTID
+SET GLOBAL gtid_mode = on;
+-- обязательно прописать в my.cnf
+
+-- позиция бинлога уже не нужна - все из коробки
+STOP SLAVE;
+CHANGE MASTER TO MASTER_HOST='10.128.15.225', MASTER_USER='repl', MASTER_PASSWORD='oTUSlave#2020', GET_MASTER_PUBLIC_KEY = 1, MASTER_AUTO_POSITION=1;
+START SLAVE;
+show variables like 'gtid%';
+
+-- теперь в статусе есть GTID
+SHOW MASTER STATUS;
+
+show slave status\G
+SELECT @@gtid_executed;
+SELECT @@gtid_purged;
+
+-- полусинхронная репликация
+-- https://dev.mysql.com/doc/refman/8.0/en/replication-semisync-installation.html
+INSTALL PLUGIN rpl_semi_sync_master SONAME 'semisync_master.so';
+show plugins;
+set global rpl_semi_sync_master_enabled = 1;
+show variables like '%semi%';
+
+-- опции настройки репликации
+-- https://dev.mysql.com/doc/refman/8.0/en/replication-options-source.html
+
+-- мониторинг на слейве
+use performance_schema
+show TABLEs;
+SELECT * FROM replication_connection_configuration;
+SELECT * FROM replication_connection_status\G
+
+CHANGE REPLICATION FILTER REPLICATE_IGNORE_TABLE = (before_rpl.test);
+
+gcloud compute instances delete mysql1
+gcloud compute instances delete mysql2

@@ -20,7 +20,7 @@ ssl-key = /cert/server-key.pem
 /* Создаем папку /c/projects/otus/percona/pxc/cert с вышеуказанными сертификатами, сгенерированными через mysql_ssl_rsa_setup */
 
 /* Создаем сеть */
-docker network create pxc-network
+docker network CREATE pxc-network
 
 /* Создаем первую ноду */
 docker run -d -e MYSQL_ROOT_PASSWORD=test1234# -e CLUSTER_NAME=pxc-cluster --name=pxc-1 --net=pxc-network -v /c/projects/otus/percona/pxc/cert:/cert -v /c/projects/otus/percona/pxc/config:/etc/percona-xtradb-cluster.conf.d percona/percona-xtradb-cluster:8.0
@@ -38,15 +38,15 @@ wsrep_incoming_addresses         | 50121249280a:3306,165bca4a4135:3306,df3fff303
 
 /* Проверка работы - вторая */
 docker exec -it pxc-1 /usr/bin/mysql -uroot -ptest1234#
-create database test;
+CREATE DATABASE test;
 docker exec -it pxc-2 /usr/bin/mysql -uroot -ptest1234#
 show databases;
 +--------------------+
-| Database           |
+| DATABASE           |
 +--------------------+
-| information_schema |
+| information_SCHEMA |
 | mysql              |
-| performance_schema |
+| performance_SCHEMA |
 | sys                |
 | test               |
 +--------------------+

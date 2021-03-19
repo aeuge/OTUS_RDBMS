@@ -1,0 +1,19 @@
+-- docker
+
+-- развернем ВМ cassandra в GCE
+gcloud beta compute --project=calm-tendril-290110 instances CREATE cassandra --zone=us-central1-a --machine-type=e2-standard-2 --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=322426944095-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/servicecontrol,https://www.googleapis.com/auth/service.management.readonly,https://www.googleapis.com/auth/trace.append --image=ubuntu-2004-focal-v20201111 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=postgresdocker --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+
+gcloud compute ssh cassandra
+
+-- поставим докер
+sudo apt-get UPDATE && sudo apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common && curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add - && sudo apt-key fingerprint 0EBFCD88 && sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) sTABLE" && sudo apt-get UPDATE && sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+
+-- запустим кассандру
+sudo docker run --name cassandra -d bitnami/cassandra:latest
+
+--запустим клиента
+sudo docker exec -it cassandra cqlsh -u cassandra -p cassandra
+
+
+-- удалим наш проект
+gcloud compute instances delete cassandra

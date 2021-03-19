@@ -1,0 +1,184 @@
+-- развернем ВМ mysql в GCE
+gcloud beta compute --project=celtic-house-266612 instances CREATE mysql --zone=us-central1-a --machine-type=e2-medium --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/servicecontrol,https://www.googleapis.com/auth/service.management.readonly,https://www.googleapis.com/auth/trace.append --image=ubuntu-2010-groovy-v20201210 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=mysql --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+ 
+gcloud compute ssh mysql
+
+-- Поставим 8 мускуль
+-- https://www.mysql.com/downloads/
+-- пакет 8.16 для ubuntu 2020-10 groovy
+sudo wget -c https://dev.mysql.com/get/mysql-apt-config_0.8.16-1_all.deb
+sudo dpkg -i mysql-apt-config_0.8.16-1_all.deb
+sudo apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5
+sudo apt update
+sudo apt-get install mysql-server -y
+
+sudo wget -c https://dev.mysql.com/get/mysql-apt-config_0.8.16-1_all.deb && sudo dpkg -i mysql-apt-config_0.8.16-1_all.deb && sudo apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5 && sudo apt UPDATE && sudo apt-get install mysql-server -y
+
+-- зададим рутовый пароль Otus321$
+
+-- обязательно запустить скрипт начальной секурной установки
+sudo mysql_secure_installation
+
+sudo systemctl status mysql
+-- sudo systemctl enable mysql
+sudo mysql -u root -p
+> show databases;
+
+-- Задали пароль, но все равно пускает, почему?
+-- уже не пускает %)
+SELECT * FROM mysql.USER WHERE User="root";
+
+
+-- ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'OtusOtus1#';
+-- mysql_native_password - для совместимости с версией 5.7
+-- для 8.0 caching_sha2_password
+-- https://dev.mysql.com/doc/refman/8.0/en/authentication-plugins.html
+
+sudo su
+cd $HOME
+nano .my.cnf
+[client]
+password=”OtusOtus1#”
+
+mysql
+
+-- упс уже не работает %) в 8.0.22
+-- https://dev.mysql.com/doc/refman/8.0/en/option-files.html
+
+CREATE USER localuser@localhost IDENTIFIED WITH caching_sha2_password BY 'oTUSlave#2020';
+GRANT ALL PRIVILEGES ON *.* TO localuser@localhost WITH GRANT OPTION;
+mysql_config_editor set --login-path=client --host=localhost --user=localUSER --password
+
+mysql
+
+-- и опять не работает %(
+-- а все из-за ошибки кодировки спецсимолов в mysql_config_editor
+
+ALTER USER 'localuser'@'localhost' IDENTIFIED WITH mysql_native_password BY 'Otus123';
+mysql_config_editor set --login-path=client --host=localhost --user=localUSER --password
+cd $HOME
+cat .mylogin.cnf
+
+mysql
+
+-- посмотреть логи
+cat /var/log/mysql/error.log
+
+Как это устроено в процессах:
+ps ax|grep mysqld
+ps -eLf|grep mysqld
+
+-- В файлах:
+sudo ls -l /var/lib/mysql
+
+-- В конфигах:
+cd /etc/mysql
+ls -l
+
+-- В логическом виде:
+use mysql
+show TABLEs;
+
+use information_schema
+show TABLEs;
+-- посмотрим описание полей
+desc TABLEs;
+-- можем развернуть таблицу в 1 колонку
+desc TABLEs \G
+SELECT * FROM mysql.USER WHERE User="root";
+SELECT * FROM mysql.USER WHERE User="root" \G
+
+-----
+CREATE DATABASE otus;
+-- можем через show посмотреть ddl созданного обьекта
+show CREATE DATABASE otus;
+SELECT * FROM information_schema.schemata;
+use otus;
+CREATE TABLE t (i int primary key auto_increment, text varchar(100));
+show CREATE TABLE t;
+INSERT INTO t (text) VALUES ('Vasya');
+SELECT * FROM t;
+
+-- посмотрим перфоманс схему
+use performance_schema
+show TABLEs;
+SELECT * FROM status_by_user;
+SHOW STATUS LIKE 'perf%';
+SHOW VARIABLES LIKE 'perf%';
+
+
+SHOW ENGINES;
+
+-- посмотрим на myisam
+use otus;
+CREATE TABLE t_myisam (i int primary key auto_increment, text varchar(100)) engine myisam;
+INSERT INTO t_myisam (text) VALUES ('Vasya');
+show CREATE TABLE t_myisam;
+-- поменяем движок на innodb
+ALTER TABLE t_myisam engine = innodb;
+show CREATE TABLE t_myisam;
+-- посмотрим на файлы - создался каталог с именем базы данных
+sudo ls -l /var/lib/mysql/otus
+
+-- innodb 
+show variables like '%buffer%'; 
+show variables like 'inno%trx%';
+show variables like '%timeout%';
+
+show variables like '%per%';
+
+-- мониторинг
+use performance_schema
+SHOW PROCESSLIST;
+SHOW ENGINE INNODB STATUS\G
+SHOW TABLE STATUS;
+SHOW VARIABLES LIKE '%';
+SHOW STATUS LIKE '%';
+-- помониторим буфер
+sudo mysqladmin --help
+sudo mysqladmin ext -ri1 | grep Innodb_buffer_pool_reads
+
+SHOW VARIABLES LIKE '%Sort_buffer_size%';
+
+show variables like '%timeout%';
+show variables like 'Net_write_timeout';
+show variables like '%Max_allowed_packet%';
+set global Net_write_timeout = 30;--не попадет в автоконф - для текущего запущенного экземпляра
+set @@Net_write_timeout = 35; -->mysql-auto.cnf
+set persist Net_write_timeout = 30; -->mysql-auto.cnf
+-- в директории с данными для версии до 8.0.22
+sudo cat /var/lib/mysql/mysql-auto.cnf
+-- в 8.0.22
+sudo cat /var/lib/mysql/mysqld-auto.cnf
+
+
+-- Потестим наши движки через сисбенч
+CREATE USER otus@'localhost' IDENTIFIED WITH mysql_native_password BY 'OtusOtus2#';
+grant all privileges on otus.* to otus@'localhost';
+flush privileges; -- до версии 5.7
+mysql -u otus -p'OtusOtus2#'
+show databases;
+
+sudo apt install sysbench -y
+-- подготовим таблицу
+sysbench --mysql-host=localhost --mysql-user=otus --mysql-password='OtusOtus2#' --db-driver=mysql --mysql-db=otus /usr/share/sysbench/oltp_read_write.lua prepare
+-- запустим тест
+sysbench --mysql-host=localhost --mysql-user=otus --mysql-password='OtusOtus2#' --db-driver=mysql --mysql-db=otus /usr/share/sysbench/oltp_read_write.lua run
+ALTER TABLE sbtest1 engine myisam;
+sysbench --mysql-host=localhost --mysql-user=otus --mysql-password='OtusOtus2#' --db-driver=mysql --mysql-db=otus /usr/share/sysbench/oltp_read_write.lua run
+ALTER TABLE sbtest1 engine memory;
+sysbench --mysql-host=localhost --mysql-user=otus --mysql-password='OtusOtus2#' --db-driver=mysql --mysql-db=otus /usr/share/sysbench/oltp_read_write.lua run
+
+
+-- поставим утилиту настройки производительности
+sudo apt install mysqltuner -y
+
+
+-- Примеры работы с кодировками
+SHOW CHARACTER SET LIKE 'latin%';
+SHOW COLLATION WHERE Charset = 'latin1';
+
+CREATE DATABASE db_name CHARACTER SET latin1 COLLATE latin1_swedish_ci;
+
+SET NAMES utf8 COLLATE utf8_unicode_ci
+SET CHARACTER SET utf8

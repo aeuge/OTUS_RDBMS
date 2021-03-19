@@ -1,0 +1,307 @@
+-- размернем 3 ВМ для кластера PXC
+-- pxc1
+gcloud beta compute --project=celtic-house-266612 instances CREATE pxc1 --zone=us-central1-a --machine-type=e2-small --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/cloud-platform --image=ubuntu-2004-focal-v20210223 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=pxc1 --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+
+-- pxc2
+gcloud beta compute --project=celtic-house-266612 instances CREATE pxc2 --zone=us-central1-a --machine-type=e2-small --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/cloud-platform --image=ubuntu-2004-focal-v20210223 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=pxc2 --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+
+-- pxc3
+gcloud beta compute --project=celtic-house-266612 instances CREATE pxc3 --zone=us-central1-a --machine-type=e2-small --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/cloud-platform --image=ubuntu-2004-focal-v20210223 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=pxc3 --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+
+-- подготовим репозиторий
+-- https://www.percona.com/doc/percona-repo-config/percona-release.html#deb-based-gnu-linux-distributions
+
+-- pxc1
+gcloud compute ssh pxc1
+sudo apt UPDATE && sudo apt install -y wget gnupg2 lsb-release
+wget https://repo.percona.com/apt/percona-release_latest.generic_all.deb
+sudo dpkg -i percona-release_latest.generic_all.deb
+
+-- установим кластер
+-- https://www.percona.com/doc/percona-xtradb-cluster/8.0/install/apt.html#apt
+sudo percona-release enable-only pxc-80 release
+sudo percona-release enable tools release
+sudo apt update
+sudo apt install percona-xtradb-cluster -y
+-- пароль Otus321$
+
+--pxc2
+gcloud compute ssh pxc2 
+--pxc3
+gcloud compute ssh pxc3 
+sudo apt UPDATE && sudo apt install -y wget gnupg2 lsb-release && wget https://repo.percona.com/apt/percona-release_latest.generic_all.deb && sudo dpkg -i percona-release_latest.generic_all.deb && sudo percona-release enable-only pxc-80 release && sudo percona-release enable tools release && sudo apt UPDATE && sudo apt install percona-xtradb-cluster -y 
+
+-- сконфигурируем кластер
+-- https://www.percona.com/doc/percona-xtradb-cluster/8.0/configure.html#configure
+sudo service mysql stop
+sudo nano /etc/mysql/mysql.conf.d/mysqld.cnf
+
+-- зададим ip !!! внутренней сети !!! и имя ноды
+wsrep_provider=/usr/lib/galera4/libgalera_smm.so
+wsrep_cluster_name=pxc-cluster
+wsrep_cluster_address=gcomm://10.128.0.3,10.128.15.232,10.128.15.233
+wsrep_node_name=pxc1
+wsrep_node_address=10.128.15.227
+pxc_strict_mode=ENFORCING
+
+-- бутстрапим 1 ноду
+-- https://www.percona.com/doc/percona-xtradb-cluster/8.0/bootstrap.html#bootstrap
+sudo systemctl start mysql@bootstrap.service
+
+sudo su
+cd $HOME
+nano .my.cnf
+[client]
+password="Otus321$"
+
+mysql
+> show status like 'wsrep%';
+
+-- добавим другие ноды
+-- https://www.percona.com/doc/percona-xtradb-cluster/8.0/add-node.html#add-node
+-- on pxc2
+sudo service mysql stop
+sudo nano /etc/mysql/mysql.conf.d/mysqld.cnf
+
+wsrep_cluster_name=pxc-cluster
+wsrep_cluster_address=gcomm://10.128.0.3,10.128.15.232,10.128.15.233
+wsrep_node_name=pxc2
+
+-- on pxc3
+sudo service mysql stop
+sudo nano /etc/mysql/mysql.conf.d/mysqld.cnf
+
+wsrep_cluster_address=gcomm://10.128.0.3,10.128.15.232,10.128.15.233
+wsrep_node_name=pxc3
+
+
+sudo systemctl start mysql
+
+> show status like 'wsrep%';
+
+
+-- и ничего не заработало как обычно %)
+sudo cat /var/log/mysql/error.log
+2021-03-02T13:07:53.671538Z 0 [ERROR] [MY-000000] [Galera] handshake with remote endpoint ssl://10.128.15.227:4567 failed: asio.ssl:67567754: 'invalid padding' ( 67567754: 'error:0407008A:rsa routines:RSA_padding_check_PKCS1_type_1:invalid padding')
+This error is often caused by SSL issues. For more information, please see:
+--  https://per.co.na/pxc/encrypt_cluster_traffic
+-- или отключать шифрование
+-- pxc_encrypt_cluster_traffic=OFF
+-- или
+
+-- on pxc2 pxc3
+sudo su
+rm /var/lib/mysql/server-key.pem && rm /var/lib/mysql/ca.pem && rm /var/lib/mysql/server-cert.pem
+
+-- on pxc1
+gcloud compute scp /var/lib/mysql/server-key.pem pxc2:/var/lib/mysql/server-key.pem
+gcloud compute scp /var/lib/mysql/ca.pem pxc2:/var/lib/mysql/ca.pem
+gcloud compute scp /var/lib/mysql/server-cert.pem pxc2:/var/lib/mysql/server-cert.pem
+
+gcloud compute scp /var/lib/mysql/server-key.pem pxc3:/var/lib/mysql/server-key.pem
+gcloud compute scp /var/lib/mysql/ca.pem pxc3:/var/lib/mysql/ca.pem
+gcloud compute scp /var/lib/mysql/server-cert.pem pxc3:/var/lib/mysql/server-cert.pem
+
+-- on pxc2 pxc3
+chown mysql:mysql /var/lib/mysql/server-key.pem && chown mysql:mysql /var/lib/mysql/ca.pem && chown mysql:mysql /var/lib/mysql/server-cert.pem
+systemctl start mysql
+
+> show status like 'wsrep%';
+
+-- также еще 2 варианта - общую папку для ключей
+-- организовать доступ с 2 и 3 машины к ключам на 1 машине
+-- https://www.percona.com/blog/2020/05/18/percona-xtradb-cluster-8-0-behavior-change-for-pxc-encrypt-cluster-traffic/
+
+-- проверим, что все работает
+https://www.percona.com/doc/percona-xtradb-cluster/8.0/verify.html#verify
+CREATE DATABASE otus;
+use otus;
+CREATE TABLE t ( i int);
+-- having an error
+INSERT INTO t VALUES (10), (20); 
+
+CREATE TABLE accounts (
+    id SERIAL,
+    balance DECIMAL
+);
+INSERT INTO accounts(balance) VALUES ('10.0'), ('20.0'); 
+-- обратим внимание на id
+SELECT * FROM accounts; 
+
+-- on pxc2 pxc3
+mysql -p
+use otus;
+SELECT * FROM accounts;
+INSERT INTO accounts(balance) VALUES ('10.0'), ('20.0'); 
+SELECT * FROM accounts;
+
+если упали все ноды
+2020-08-25T13:30:40.725502Z 0 [Note] [MY-000000] [WSREP] Starting replication
+2020-08-25T13:30:40.725565Z 0 [Note] [MY-000000] [Galera] Connecting with bootstrap option: 1
+2020-08-25T13:30:40.725640Z 0 [Note] [MY-000000] [Galera] Setting GCS initial position to a5066e8e-e5e5-11ea-942d-8a1ba08de78c:10
+2020-08-25T13:30:40.725765Z 0 [ERROR] [MY-000000] [Galera] It may not be safe to bootstrap the cluster
+FROM this node. 
+!!! It was not the last one to leave the cluster !!!
+and may not contain all the updates. 
+To force cluster bootstrap with this node, edit the grastate.dat file manually and set safe_to_bootstrap to 1 .
+
+-- настройки
+show variables like '%wsrep%'\G
+-- wsrep_provider_options
+
+
+-- добавим 4 ноду
+gcloud beta compute --project=celtic-house-266612 instances CREATE pxc4 --zone=us-central1-a --machine-type=e2-small --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/cloud-platform --image=ubuntu-2004-focal-v20210223 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=pxc4 --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+gcloud compute ssh pxc4
+sudo apt UPDATE && sudo apt install -y wget gnupg2 lsb-release && wget https://repo.percona.com/apt/percona-release_latest.generic_all.deb && sudo dpkg -i percona-release_latest.generic_all.deb && sudo percona-release enable-only pxc-80 release && sudo percona-release enable tools release && sudo apt UPDATE && sudo apt install percona-xtradb-cluster -y 
+sudo service mysql stop
+sudo nano /etc/mysql/mysql.conf.d/mysqld.cnf
+
+wsrep_cluster_address=gcomm://10.128.0.3,10.128.15.232,10.128.15.233
+wsrep_node_name=pxc4
+
+sudo su
+rm /var/lib/mysql/server-key.pem && rm /var/lib/mysql/ca.pem && rm /var/lib/mysql/server-cert.pem
+
+-- on pxc1
+gcloud compute scp /var/lib/mysql/server-key.pem pxc4:/var/lib/mysql/server-key.pem
+gcloud compute scp /var/lib/mysql/ca.pem pxc4:/var/lib/mysql/ca.pem
+gcloud compute scp /var/lib/mysql/server-cert.pem pxc4:/var/lib/mysql/server-cert.pem
+
+-- on pxc4
+chown mysql:mysql /var/lib/mysql/server-key.pem && chown mysql:mysql /var/lib/mysql/ca.pem && chown mysql:mysql /var/lib/mysql/server-cert.pem
+systemctl start mysql
+
+mysql -p
+use otus
+
+gcloud compute instances delete pxc4
+
+
+
+-- поставим proxySQL для лоанд балансинга
+-- https://www.percona.com/doc/percona-xtradb-cluster/8.0/howtos/proxysql.html#load-balancing-with-proxysql
+-- pxc ProxySql
+gcloud beta compute --project=celtic-house-266612 instances CREATE pxcps --zone=us-central1-a --machine-type=e2-small --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/cloud-platform --image=ubuntu-2004-focal-v20210223 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=pxcps --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+gcloud compute ssh pxcps
+-- не сработает
+sudo apt install percona-xtradb-cluster-client 
+
+sudo apt UPDATE && sudo apt install -y wget gnupg2 lsb-release && wget https://repo.percona.com/apt/percona-release_latest.generic_all.deb && sudo dpkg -i percona-release_latest.generic_all.deb && sudo apt update
+sudo apt install percona-xtradb-cluster-client -y 
+-- опять никак. есть идеи?
+
+
+sudo apt-cache search percona
+sudo percona-release enable-only pxc-80 release
+sudo percona-release enable tools release
+sudo apt update
+sudo apt install percona-xtradb-cluster-client -y
+sudo apt install proxysql2 -y
+
+-- заходим в собственную оболочку ProxySQL
+mysql -u admin -padmin -h 127.0.0.1 -P 6032
+> SHOW DATABASES;
+> SHOW TABLES;
+
+
+-- gcomm://10.128.0.3,10.128.15.232,10.128.15.233
+-- Adding cluster nodes to ProxySQL
+> INSERT INTO mysql_servers(hostgroup_id, hostname, port) VALUES (1,'10.128.0.3',3306);
+> INSERT INTO mysql_servers(hostgroup_id, hostname, port) VALUES (1,'10.128.15.232',3306);
+> INSERT INTO mysql_servers(hostgroup_id, hostname, port) VALUES (1,'10.128.15.233',3306);
+> SELECT * FROM mysql_servers;
+
+-- как думаете заработает после этого?)
+
+-- Note
+ProxySQL has 3 areas WHERE the configuration can reside:
+    MEMORY (your current working place)
+    RUNTIME (the production settings)
+    DISK (durable configuration, saved inside an SQLITE database)
+When you change a parameter, you change it in MEMORY area. That is done by design to allow you to test the changes before pushing to production (RUNTIME), or save them to disk.
+
+-- https://github.com/sysown/proxysql/blob/master/doc/admin_TABLEs.md
+-- https://github.com/sysown/proxysql/blob/master/doc/global_variables.md
+-- https://github.com/sysown/proxysql/blob/master/doc/configuration_howto.md
+
+-- посмотрим статус мониторинга
+SELECT * FROM monitor.mysql_server_connect_log ORDER BY time_start_us DESC LIMIT 6;
+-- !!! иначе несмотря на наличие серверов нчиего работать не будет
+LOAD MYSQL SERVERS TO RUNTIME;
+SAVE MYSQL SERVERS TO DISK;
+SELECT hostgroup_id,hostname,port,status FROM runtime_mysql_servers;
+
+
+-- по какой-то причине нет группы по умолчанию ??
+INSERT INTO mysql_replication_hostgroups (writer_hostgroup,reader_hostgroup,comment) VALUES (0,1,'cluster1');
+LOAD MYSQL SERVERS TO RUNTIME;
+SAVE MYSQL SERVERS TO DISK;
+
+-- посмотрим на группы репликации
+SELECT * FROM mysql_servers;
+
+-- добавим юзера на 
+-- on pxc1, 2, 3 - достаточно на 1, т.к. мультимастер %)
+-- наконец то поправили и можно использовать caching_sha2_password
+-- CREATE USER 'proxysql'@'%' IDENTIFIED WITH mysql_native_password by 'Otus321$';
+CREATE USER 'proxysql'@'%' IDENTIFIED WITH caching_sha2_password by 'Otus321$';
+SELECT * FROM mysql.user\G
+
+-- и пропишем его в настройках on pxcps
+-- !!! ProxySQL currently doesn’t encrypt passwords.
+UPDATE global_variables SET variable_value='proxysql' WHERE variable_name='mysql-monitor_username';
+UPDATE global_variables SET variable_value='Otus321$' WHERE variable_name='mysql-monitor_password';
+-- !!! загрузим конфигурацию в оперативную память !!!
+-- To enable monitoring of these nodes, load them at runtime:
+LOAD MYSQL VARIABLES TO RUNTIME;
+SAVE MYSQL VARIABLES TO DISK;
+SELECT * FROM monitor.mysql_server_connect_log ORDER BY time_start_us DESC LIMIT 6;
+
+
+
+-- Creating ProxySQL Client User
+INSERT INTO mysql_users (username,password) VALUES ('sbuser','Otus321$');
+LOAD MYSQL USERS TO RUNTIME;
+-- !!! чтобы не потерять текущую конфигурацию, запишем ее на диск
+SAVE MYSQL USERS TO DISK;
+
+mysql -u sbUSER -pOtus321$ -h 127.0.0.1 -P 6033
+-- не работает, что пошло не так??
+
+CREATE USER 'sbuser'@'10.128.15.231' IDENTIFIED WITH caching_sha2_password BY 'Otus321$';
+GRANT ALL ON *.* TO 'sbuser'@'10.128.15.235';
+-- пичаль беда, что опять пошло не так??
+
+sudo cat /var/lib/proxysql/proxysql.log
+
+
+SELECT * FROM mysql.user;
+SELECT @@hostname;
+
+-- автоматическая настройка
+-- https://www.percona.com/doc/percona-xtradb-cluster/LATEST/howtos/proxysql-v2.html
+-- https://proxysql.com/documentation/proxysql-configuration/
+
+-- мониторинг прикрутим 
+https://www.percona.com/software/database-tools/percona-monitoring-and-management
+https://www.percona.com/blog/2017/02/24/installing-percona-monitoring-and-management-pmm-for-the-first-time-2/
+
+
+-- проверим отказоустойчивость
+SELECT hostgroup_id,hostname,port,status FROM mysql_servers;
+service stop mysql
+nc -zv 10.128.15.193 3306
+
+
+show CREATE TABLE runtime_mysql_galera_hostgroups\G
+SELECT * FROM global_variables WHERE variable_name LIKE 'mysql-monitor_%';
+
+
+gcloud compute instances delete pxc3
+gcloud compute instances delete pxc2
+gcloud compute instances delete pxc1
+gcloud compute instances delete pxcps
+
+
+-- почему hostgroup по умолчанию 0 ?

@@ -1,0 +1,212 @@
+InnoDB cluster
+-- innodb1
+gcloud beta compute --project=celtic-house-266612 instances CREATE innodb1 --zone=us-central1-a --machine-type=e2-small --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/cloud-platform --image=ubuntu-2004-focal-v20210223 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=innodb1 --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+-- innodb2
+gcloud beta compute --project=celtic-house-266612 instances CREATE innodb2 --zone=us-central1-a --machine-type=e2-small --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/cloud-platform --image=ubuntu-2004-focal-v20210223 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=innodb2 --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+-- innodb3
+gcloud beta compute --project=celtic-house-266612 instances CREATE innodb3 --zone=us-central1-a --machine-type=e2-small --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/cloud-platform --image=ubuntu-2004-focal-v20210223 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=innodb3 --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+
+-- установим mysql && shell
+gcloud compute ssh innodb1
+sudo wget -c https://dev.mysql.com/get/mysql-apt-config_0.8.16-1_all.deb && sudo dpkg -i mysql-apt-config_0.8.16-1_all.deb && sudo apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5 && sudo apt UPDATE && sudo apt-get install mysql-server mysql-shell -y
+
+mysqlsh
+-- сконфигурируем инстанс, заодно включатся GTID и т.д.
+> dba.configureLocalInstance("root@localhost:3306");
+Responses to those questions with the following answers:
+
+    Pick 2 - CREATE a new admin account for InnoDB cluster with minimal required grants
+    Account Name: clusteradmin@%
+    Password: Otus321$
+    Confirm password: Otus321$
+    -- mys3cret&&
+    Do you want to perform the required configuration changes?: y
+    Do you want to restart the instance after configuring it?: y
+
+-- !!! Don't forget to repeat the above on the all DATABASE nodes !!!
+
+-- то же самое на других нодах
+
+-- on innodb1
+shell.connect('clusteradmin@innodb1:3306');
+
+-- перейдем в режим sql
+\sql
+show databases;
+CREATE DATABASE otus;
+SELECT * FROM mysql.user\G
+
+\js
+-- вариант не заработает
+cluster = dba.CREATECluster('my_innodb_cluster');
+cluster.status()
+-- "statusText": "Cluster is NOT tolerant to any failures.",
+cluster.addInstance('clusteradmin@innodb2:3306');
+cluster.addInstance('clusteradmin@innodb3:3306');
+
+-- опять грусть печаль
+
+https://dev.mysql.com/doc/refman/8.0/en/group-replication-ip-address-permissions.html
+\sql
+-- show variables like 'group_replication_ip_whitelist';
+show variables like 'group_replication%';
+\js
+
+
+cluster = dba.getCluster()
+-- опции не сработают
+cluster.setOption({ipWhitelist: '10.128.0.2,10.128.0.4,10.128.0.5'})
+-- разобрать кластер
+cluster.dissolve({force:true})
+-- cluster = dba.CREATECluster('my_innodb_cluster', {ipWhitelist: '10.128.15.202,10.128.15.203,10.128.15.204'});
+cluster = dba.CREATECluster('my_innodb_cluster2', {ipWhitelist: '10.128.0.2,10.128.0.4,10.128.0.5,::ffff:10.128.0.2,::ffff:10.128.0.4,::ffff:10.128.0.5,innodb1,innodb2,innodb3'});
+
+-- пытался вручную конфигурировать, но после рестарта инстанса все слетает
+STOP GROUP_REPLICATION;
+SET GLOBAL group_replication_ip_whitelist='10.128.15.202,10.128.15.203,10.128.15.204,::ffff:10.128.15.202,::ffff:10.128.15.203,::ffff:10.128.15.204,innodb1,innodb2,innodb3';
+START GROUP_REPLICATION;
+-- переподключиться к кластеру после разрыва
+dba.rebootClusterFROMCompleteOutage()
+
+
+https://dev.mysql.com/doc/refman/8.0/en/group-replication-ipv6.html
+show variables like 'group_replication_local_address';
+show variables like 'group_replication_group_seeds';
+show variables like 'group_replication_bootstrap_group';
+show variables like 'group_replication_ip_whitelist';
+
+
+cluster.checkInstanceState('clusteradmin@innodb2:3306');
+-- спустя 2 часа
+....
+cluster.rejoinInstance('clusteradmin@innodb3:3306');
+cd /etc/mysql/mysql.conf.d/
+adding group_replication_ip_whitelist='10.128.15.202,10.128.15.203,10.128.15.204,::ffff:10.128.15.202,::ffff:10.128.15.203,::ffff:10.128.15.204,innodb1,innodb2,innodb3';
+
+
+-- рабочий вариант
+-- ipWhiteList --> ipAllowList
+cluster = dba.CREATECluster('my_innodb_cluster2', {ipAllowlist: '10.128.0.7,10.128.0.9,10.128.0.11,::ffff:10.128.0.2,::ffff:10.128.0.4,::ffff:10.128.0.5,innodb1,innodb2,innodb3'});
+cluster.addInstance('clusteradmin@innodb2:3306', {ipAllowlist: '10.128.0.7,10.128.0.9,10.128.0.11,::ffff:10.128.0.2,::ffff:10.128.0.4,::ffff:10.128.0.5,innodb1,innodb2,innodb3'});
+cluster.addInstance('clusteradmin@innodb3:3306', {ipAllowlist: '10.128.0.7,10.128.0.9,10.128.0.11,::ffff:10.128.0.2,::ffff:10.128.0.4,::ffff:10.128.0.5,innodb1,innodb2,innodb3'});
+-- 1 нода R/W, 2 R/O
+cluster.status()
+-- для переключения в режим MM cluster.switchToMultiPrimaryMode()
+
+-- https://dev.mysql.com/doc/refman/5.7/en/mysql-innodb-cluster-working-with-cluster.html#CREATE-whitelist-servers
+
+в консоли также можем писать sql 
+shell.connect('clusteradmin@innodb1:3306');
+\sql
+
+show databases;
+use performance_schema
+show TABLEs;
+SELECT * FROM replication_group_member_stats\G
+
+show grants for clusteradmin@'%';
+GRANT ALL ON *.* TO clusteradmin@'%';
+
+
+sudo mysql -p
+GRANT ALL ON *.* TO clusteradmin@'%';
+
+-- on innodb2
+shell.connect('clusteradmin@innodb2:3306');
+\sql
+SELECT * FROM mysql.user\G
+-- не получится, т.к. R/O
+CREATE DATABASE otus;
+
+-- on innodb1
+shell.connect('clusteradmin@innodb1:3306');
+\sql
+CREATE DATABASE otus;
+
+-- on innodb2
+show databases;
+
+
+
+-- добавим 4 ноду
+gcloud beta compute --project=celtic-house-266612 instances CREATE innodb4 --zone=us-central1-a --machine-type=e2-small --subnet=default --network-tier=PREMIUM --maintenance-policy=MIGRATE --service-account=933982307116-compute@developer.gserviceaccount.com --scopes=https://www.googleapis.com/auth/cloud-platform --image=ubuntu-2004-focal-v20210223 --image-project=ubuntu-os-cloud --boot-disk-size=10GB --boot-disk-type=pd-ssd --boot-disk-device-name=innodb4 --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring --reservation-affinity=any
+
+
+gcloud compute ssh innodb4
+sudo wget -c https://dev.mysql.com/get/mysql-apt-config_0.8.16-1_all.deb && sudo dpkg -i mysql-apt-config_0.8.16-1_all.deb && sudo apt-key adv --keyserver keys.gnupg.net --recv-keys 8C718D3B5072E1F5 && sudo apt UPDATE && sudo apt-get install mysql-server mysql-shell -y
+
+mysqlsh
+> dba.configureLocalInstance("root@localhost:3306");
+
+-- on innodb1
+cluster = dba.getCluster()
+cluster.addInstance('clusteradmin@innodb4:3306', {ipWhitelist: '10.128.0.7,10.128.0.9,10.128.0.11,10.128.0.10,innodb1,innodb2,innodb3,innodb4'});
+
+-- грусть печаль %(
+cluster.status()
+cluster.checkInstanceState('clusteradmin@innodb4:3306');
+cluster.options();
+-- https://dev.mysql.com/doc/mysql-shell/8.0/en/admin-api-tagging.html
+cluster.setOption('innodb3:3306',{ipWhitelist: '10.128.0.7,10.128.0.9,10.128.0.11,10.128.0.10,innodb1,innodb2,innodb3,innodb4'})
+cluster.setOption({defaultReplicaSet:topology@innodb2:3306},{ipWhitelist: '10.128.0.7,10.128.0.9,10.128.0.11,10.128.0.10,innodb1,innodb2,innodb3,innodb4'})
+cluster.options();
+
+cluster.setInstanceOption('clusteradmin@innodb3:3306','topology:ipAllowlist', '10.128.0.7,10.128.0.9,10.128.0.11,10.128.0.10,innodb1,innodb2,innodb3,innodb4')
+-- пичаль
+
+cluster.addInstance('clusteradmin@innodb2:3306', {ipWhitelist: '10.128.0.2,10.128.0.4,10.128.0.5,10.128.0.6,::ffff:10.128.0.2,::ffff:10.128.0.4,::ffff:10.128.0.5,::ffff:10.128.0.6,innodb1,innodb2,innodb3,innodb4'});
+
+-- на всех нодах
+\sql
+STOP GROUP_REPLICATION;
+SET GLOBAL group_replication_ip_allowlist="10.128.0.7,10.128.0.9,10.128.0.11,10.128.0.10,innodb1,innodb2,innodb3,innodb4";
+START GROUP_REPLICATION;
+\js 
+cluster.options();
+
+-- on innodb1
+cluster.addInstance('clusteradmin@innodb4:3306', {ipWhitelist: '10.128.0.7,10.128.0.9,10.128.0.11,10.128.0.10,innodb1,innodb2,innodb3,innodb4'});
+
+-- мы молодцы %)
+cluster = dba.getCluster()
+cluster.status()
+
+-- switch to MultiMaster
+cluster.switchToMultiPrimaryMode()
+
+
+-- установим роутер
+https://dev.mysql.com/doc/mysql-router/8.0/en/mysql-router-installation.html
+
+sudo apt-get install mysql-router -y
+
+
+-- бутстрапим
+-- https://dev.mysql.com/doc/mysql-router/8.0/en/mysql-router-deploying-bootstrapping.html
+
+mysqlrouter --bootstrap root@localhost --directory /tmp/myrouter --conf-use-sockets --account routerfriend --account-CREATE always
+
+-- fail - нужен или чистый инстанс или мастер нода
+
+mysqlrouter --bootstrap clusteradmin@localhost --directory /tmp/myrouter --conf-use-sockets --account routerfriend --account-CREATE always
+
+## MySQL Classic protocol
+- Read/Write Connections: localhost:6446, /tmp/myrouter/mysql.sock
+- Read/Only Connections:  localhost:6447, /tmp/myrouter/mysqlro.sock
+## MySQL X protocol
+- Read/Write Connections: localhost:64460, /tmp/myrouter/mysqlx.sock
+- Read/Only Connections:  localhost:64470, /tmp/myrouter/mysqlxro.sock
+
+mysql -P 6446 -u root -p
+
+-- по производительности PXC лучше в среднем % на 20-30 по результатам sysbench
+
+-- to Master Slave
+cluster = dba.getCluster()
+cluster.switchToSinglePrimaryMode('innodb4:3306')
+
+
+gcloud compute instances delete innodb4
+gcloud compute instances delete innodb3
+gcloud compute instances delete innodb2
+gcloud compute instances delete innodb1
